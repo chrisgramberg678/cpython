@@ -29,7 +29,9 @@ import sys
 import sysconfig
 import warnings
 from collections.abc import Iterable
-from importlib._bootstrap import _load as bootstrap_load
+from importlib._bootstrap import (
+    _load as bootstrap_load,  # type: ignore[attr-defined]
+)
 from importlib.machinery import (
     BuiltinImporter,
     ExtensionFileLoader,
@@ -133,7 +135,7 @@ ModuleInfo = collections.namedtuple("ModuleInfo", "name state")
 class ModuleChecker:
     pybuilddir_txt = "pybuilddir.txt"
 
-    setup_files = (
+    setup_files: tuple[str | pathlib.Path, ...] = (
         # see end of configure.ac
         "Modules/Setup.local",
         "Modules/Setup.stdlib",
@@ -149,13 +151,13 @@ class ModuleChecker:
         self.builddir = self.get_builddir()
         self.modules = self.get_modules()
 
-        self.builtin_ok = []
-        self.shared_ok = []
-        self.failed_on_import = []
-        self.missing = []
-        self.disabled_configure = []
-        self.disabled_setup = []
-        self.notavailable = []
+        self.builtin_ok: list[ModuleInfo] = []
+        self.shared_ok: list[ModuleInfo] = []
+        self.failed_on_import: list[ModuleInfo] = []
+        self.missing: list[ModuleInfo] = []
+        self.disabled_configure: list[ModuleInfo] = []
+        self.disabled_setup: list[ModuleInfo] = []
+        self.notavailable:list[ModuleInfo] = []
 
     def check(self):
         if not hasattr(_imp, 'create_dynamic'):
@@ -280,9 +282,9 @@ class ModuleChecker:
         except FileNotFoundError:
             logger.error("%s must be run from the top build directory", __file__)
             raise
-        builddir = pathlib.Path(builddir)
-        logger.debug("%s: %s", self.pybuilddir_txt, builddir)
-        return builddir
+        builddir_path: pathlib.Path = pathlib.Path(builddir)
+        logger.debug("%s: %s", self.pybuilddir_txt, str(builddir_path))
+        return builddir_path
 
     def get_modules(self) -> list[ModuleInfo]:
         """Get module info from sysconfig and Modules/Setup* files"""
@@ -348,11 +350,11 @@ class ModuleChecker:
             logger.debug("Found %s in Makefile", modinfo)
             yield modinfo
 
-    def parse_setup_file(self, setup_file: pathlib.Path) -> Iterable[ModuleInfo]:
+    def parse_setup_file(self, setup_file: pathlib.Path | str) -> Iterable[ModuleInfo]:
         """Parse a Modules/Setup file"""
         assign_var = re.compile(r"^\w+=")  # EGG_SPAM=foo
         # default to static module
-        state = ModuleState.BUILTIN
+        state: ModuleState | None = ModuleState.BUILTIN
         logger.debug("Parsing Setup file %s", setup_file)
         with open(setup_file, encoding="utf-8") as f:
             for line in f:
@@ -381,10 +383,12 @@ class ModuleChecker:
                             logger.debug("Found %s in %s", modinfo, setup_file)
                             yield modinfo
 
-    def get_spec(self, modinfo: ModuleInfo) -> ModuleSpec:
+    def get_spec(self, modinfo: ModuleInfo) -> ModuleSpec | None:
         """Get ModuleSpec for builtin or extension module"""
         if modinfo.state == ModuleState.SHARED:
-            location = os.fspath(self.get_location(modinfo))
+            if not (module_location :=  self.get_location(modinfo)):
+                return None
+            location = os.fspath(module_location)
             loader = ExtensionFileLoader(modinfo.name, location)
             return spec_from_file_location(modinfo.name, location, loader=loader)
         elif modinfo.state == ModuleState.BUILTIN:
@@ -392,7 +396,7 @@ class ModuleChecker:
         else:
             raise ValueError(modinfo)
 
-    def get_location(self, modinfo: ModuleInfo) -> pathlib.Path:
+    def get_location(self, modinfo: ModuleInfo) -> pathlib.Path | None:
         """Get shared library location in build directory"""
         if modinfo.state == ModuleState.SHARED:
             return self.builddir / f"{modinfo.name}{self.ext_suffix}"
@@ -401,7 +405,7 @@ class ModuleChecker:
 
     def _check_file(self, modinfo: ModuleInfo, spec: ModuleSpec):
         """Check that the module file is present and not empty"""
-        if spec.loader is BuiltinImporter:
+        if spec.loader is BuiltinImporter or spec.origin is None:
             return
         try:
             st = os.stat(spec.origin)
@@ -413,8 +417,8 @@ class ModuleChecker:
 
     def check_module_import(self, modinfo: ModuleInfo):
         """Attempt to import module and report errors"""
-        spec = self.get_spec(modinfo)
-        self._check_file(modinfo, spec)
+        if (spec := self.get_spec(modinfo)) is not None:
+            self._check_file(modinfo, spec)
         try:
             with warnings.catch_warnings():
                 # ignore deprecation warning from deprecated modules
@@ -432,8 +436,8 @@ class ModuleChecker:
 
     def check_module_cross(self, modinfo: ModuleInfo):
         """Sanity check for cross compiling"""
-        spec = self.get_spec(modinfo)
-        self._check_file(modinfo, spec)
+        if (spec := self.get_spec(modinfo)) is not None:
+            self._check_file(modinfo, spec)
 
     def rename_module(self, modinfo: ModuleInfo) -> None:
         """Rename module file"""
@@ -443,6 +447,8 @@ class ModuleChecker:
 
         failed_name = f"{modinfo.name}_failed{self.ext_suffix}"
         builddir_path = self.get_location(modinfo)
+        if builddir_path is None:
+            return
         if builddir_path.is_symlink():
             symlink = builddir_path
             module_path = builddir_path.resolve().relative_to(os.getcwd())
